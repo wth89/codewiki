@@ -1,6 +1,6 @@
 'use client';
 
-import React, {useState, useRef, useEffect} from 'react';
+import React, {useState, useRef, useEffect, useMemo} from 'react';
 import {FaChevronLeft, FaChevronRight } from 'react-icons/fa';
 import Markdown from './Markdown';
 import { useLanguage } from '@/contexts/LanguageContext';
@@ -22,6 +22,7 @@ interface Provider {
 }
 
 interface Message {
+  id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
 }
@@ -42,6 +43,39 @@ interface AskProps {
   language?: string;
   onRef?: (ref: { clearConversation: () => void }) => void;
 }
+
+const createMessageId = () => {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
+const appendAssistantMessage = (history: Message[], content: string): Message[] => {
+  if (!content.trim()) return history;
+  const lastMessage = history[history.length - 1];
+  if (lastMessage?.role === 'assistant' && lastMessage.content === content) {
+    return history;
+  }
+  return [...history, { id: createMessageId(), role: 'assistant', content }];
+};
+
+const isInternalResearchPrompt = (message: Message): boolean => {
+  return message.role === 'user' && message.content.trim() === '[DEEP RESEARCH] Continue the research';
+};
+
+const normalizeDisplayMessage = (message: Message): Message | null => {
+  if (isInternalResearchPrompt(message)) {
+    return null;
+  }
+  if (message.role === 'user') {
+    return {
+      ...message,
+      content: message.content.replace(/^\[DEEP RESEARCH\]\s*/i, '')
+    };
+  }
+  return message;
+};
 
 const Ask: React.FC<AskProps> = ({
   repoInfo,
