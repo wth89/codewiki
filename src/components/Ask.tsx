@@ -98,7 +98,7 @@ const Ask: React.FC<AskProps> = ({
     if (responseRef.current) {
       responseRef.current.scrollTop = responseRef.current.scrollHeight;
     }
-  }, [response]);
+  }, [conversationHistory, response]);
 
   // Close WebSocket when component unmounts
   useEffect(() => {
@@ -171,6 +171,32 @@ const Ask: React.FC<AskProps> = ({
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+  const appendAssistantMessage = (history: Message[], content: string): Message[] => {
+    if (!content.trim()) return history;
+    const lastMessage = history[history.length - 1];
+    if (lastMessage?.role === 'assistant' && lastMessage.content === content) {
+      return history;
+    }
+    return [...history, { role: 'assistant', content }];
+  };
+
+  const isInternalResearchPrompt = (message: Message): boolean => {
+    return message.role === 'user' && message.content.trim() === '[DEEP RESEARCH] Continue the research';
+  };
+
+  const normalizeDisplayMessage = (message: Message): Message | null => {
+    if (isInternalResearchPrompt(message)) {
+      return null;
+    }
+    if (message.role === 'user') {
+      return {
+        ...message,
+        content: message.content.replace(/^\[DEEP RESEARCH\]\s*/i, '')
+      };
+    }
+    return message;
+  };
 
   // Function to check if research is complete based on response content
   const checkIfResearchComplete = (content: string): boolean => {
@@ -291,12 +317,9 @@ const Ask: React.FC<AskProps> = ({
       const currentResponse = response;
 
       // Create a new message from the AI's previous response
+      const historyWithAssistant = appendAssistantMessage(conversationHistory, currentResponse);
       const newHistory: Message[] = [
-        ...conversationHistory,
-        {
-          role: 'assistant',
-          content: currentResponse
-        },
+        ...historyWithAssistant,
         {
           role: 'user',
           content: '[DEEP RESEARCH] Continue the research'
@@ -391,6 +414,7 @@ const Ask: React.FC<AskProps> = ({
             setResearchComplete(isComplete);
           }
 
+          setConversationHistory(prev => appendAssistantMessage(prev, fullResponse));
           setIsLoading(false);
         }
       );
@@ -470,6 +494,7 @@ const Ask: React.FC<AskProps> = ({
       } else {
         setResearchComplete(isComplete);
       }
+      setConversationHistory(prev => appendAssistantMessage(prev, fullResponse));
     } catch (error) {
       console.error('Error during HTTP fallback:', error);
       setResponse(prev => prev + '\n\nError: Failed to get a response. Please try again.');
@@ -528,6 +553,26 @@ const Ask: React.FC<AskProps> = ({
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [response, isLoading, deepResearch, researchIteration]);
+
+  const displayHistory = (() => {
+    const normalized = conversationHistory
+      .map(normalizeDisplayMessage)
+      .filter((message): message is Message => Boolean(message));
+    if (response) {
+      const lastHistoryMessage = conversationHistory[conversationHistory.length - 1];
+      if (!lastHistoryMessage || lastHistoryMessage.role !== 'assistant') {
+        normalized.push({ role: 'assistant', content: response });
+      } else if (normalized.length > 0 && normalized[normalized.length - 1].role === 'assistant') {
+        normalized[normalized.length - 1] = {
+          ...normalized[normalized.length - 1],
+          content: response
+        };
+      } else {
+        normalized.push({ role: 'assistant', content: response });
+      }
+    }
+    return normalized;
+  })();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -615,6 +660,7 @@ const Ask: React.FC<AskProps> = ({
             }
           }
 
+          setConversationHistory(prev => appendAssistantMessage(prev, fullResponse));
           setIsLoading(false);
         }
       );
@@ -731,14 +777,41 @@ const Ask: React.FC<AskProps> = ({
           </div>
         </form>
 
-        {/* Response area */}
-        {response && (
+        {/* Conversation area */}
+        {(displayHistory.length > 0 || isLoading) && (
           <div className="border-t border-gray-200 dark:border-gray-700 mt-4">
             <div
               ref={responseRef}
-              className="p-4 max-h-[500px] overflow-y-auto"
+              className="p-4 max-h-[500px] overflow-y-auto space-y-4"
             >
-              <Markdown content={response} />
+              {displayHistory.length === 0 ? (
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  {messages.ask?.historyEmpty || 'No messages yet.'}
+                </div>
+              ) : (
+                displayHistory.map((message, index) => {
+                  const isUser = message.role === 'user';
+                  return (
+                    <div key={`${message.role}-${index}`} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                      <div
+                        className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm leading-relaxed shadow-sm ${
+                          isUser
+                            ? 'bg-[var(--accent-primary)] text-white'
+                            : 'bg-[var(--card-bg)] text-[var(--foreground)] border border-[var(--border-color)]'
+                        }`}
+                      >
+                        {isUser ? (
+                          <p className="whitespace-pre-wrap">{message.content}</p>
+                        ) : (
+                          <div className="-mx-2 -my-4">
+                            <Markdown content={message.content} />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
 
             {/* Research navigation and clear button */}

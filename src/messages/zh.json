@@ -135,7 +135,8 @@
     "refiningConclusions": "完善研究结论...",
     "addressingEdgeCases": "处理剩余边缘情况...",
     "finalizingAnswer": "最终整合综合答案...",
-    "synthesizingFindings": "综合所有研究发现..."
+    "synthesizingFindings": "综合所有研究发现...",
+    "historyEmpty": "暂无对话记录"
   },
   "repoPage": {
     "refreshWiki": "刷新Wiki",

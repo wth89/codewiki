@@ -103,7 +103,8 @@
     "continueResearch": "Continue Research",
     "viewPlan": "View Plan",
     "viewUpdates": "View Updates",
-    "viewConclusion": "View Conclusion"
+    "viewConclusion": "View Conclusion",
+    "historyEmpty": "No messages yet."
   },
   "repoPage": {
     "refreshWiki": "Refresh Wiki",
