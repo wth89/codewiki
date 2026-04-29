@@ -560,11 +560,10 @@ const Ask: React.FC<AskProps> = ({
       .filter((message): message is Message => Boolean(message));
     if (response) {
       const lastHistoryMessage = conversationHistory[conversationHistory.length - 1];
-      if (!lastHistoryMessage || lastHistoryMessage.role !== 'assistant') {
-        normalized.push({ role: 'assistant', content: response });
-      } else if (normalized.length > 0 && normalized[normalized.length - 1].role === 'assistant') {
+      const lastNormalizedMessage = normalized[normalized.length - 1];
+      if (lastHistoryMessage?.role === 'assistant' && lastNormalizedMessage?.role === 'assistant') {
         normalized[normalized.length - 1] = {
-          ...normalized[normalized.length - 1],
+          ...lastNormalizedMessage,
           content: response
         };
       } else {
@@ -803,9 +802,7 @@ const Ask: React.FC<AskProps> = ({
                         {isUser ? (
                           <p className="whitespace-pre-wrap">{message.content}</p>
                         ) : (
-                          <div className="-mx-2 -my-4">
-                            <Markdown content={message.content} />
-                          </div>
+                          <Markdown content={message.content} compact />
                         )}
                       </div>
                     </div>

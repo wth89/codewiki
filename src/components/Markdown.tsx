@@ -8,9 +8,10 @@ import Mermaid from './Mermaid';
 
 interface MarkdownProps {
   content: string;
+  compact?: boolean;
 }
 
-const Markdown: React.FC<MarkdownProps> = ({ content }) => {
+const Markdown: React.FC<MarkdownProps> = ({ content, compact = false }) => {
   // Define markdown components
   const MarkdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
     p({ children, ...props }: { children?: React.ReactNode }) {
@@ -193,7 +194,7 @@ const Markdown: React.FC<MarkdownProps> = ({ content }) => {
   };
 
   return (
-    <div className="prose prose-base dark:prose-invert max-w-none px-2 py-4">
+    <div className={`prose prose-base dark:prose-invert max-w-none ${compact ? 'px-0 py-0' : 'px-2 py-4'}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeRaw]}
