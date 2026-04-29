@@ -103,7 +103,16 @@
     "continueResearch": "Continue Research",
     "viewPlan": "View Plan",
     "viewUpdates": "View Updates",
-    "viewConclusion": "View Conclusion"
+    "viewConclusion": "View Conclusion",
+    "historyTitle": "Conversation History",
+    "newConversation": "New Chat",
+    "loadingHistory": "Loading conversations...",
+    "emptyHistory": "No previous conversations yet.",
+    "historyLoadError": "Unable to load conversations.",
+    "loadingConversation": "Loading conversation...",
+    "emptyConversation": "Start a new conversation to see messages here.",
+    "untitledConversation": "Untitled conversation",
+    "researchStages": "Research stages"
   },
   "repoPage": {
     "refreshWiki": "Refresh Wiki",

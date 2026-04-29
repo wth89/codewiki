@@ -1,6 +1,6 @@
 'use client';
 
-import React, {useState, useRef, useEffect} from 'react';
+import React, {useState, useRef, useEffect, useCallback} from 'react';
 import {FaChevronLeft, FaChevronRight } from 'react-icons/fa';
 import Markdown from './Markdown';
 import { useLanguage } from '@/contexts/LanguageContext';
@@ -8,6 +8,9 @@ import RepoInfo from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
 import ModelSelectionModal from './ModelSelectionModal';
 import { createChatWebSocket, closeWebSocket, ChatCompletionRequest } from '@/utils/websocketClient';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8001';
+const INTERNAL_DEEP_RESEARCH_CONTINUE = '[DEEP RESEARCH] Continue the research';
 
 interface Model {
   id: string;
@@ -24,6 +27,22 @@ interface Provider {
 interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
+}
+
+interface ConversationSummary {
+  id: string;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ConversationMessageRecord {
+  id: string;
+  conversationId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  tokenCount: number | null;
+  createdAt: string;
 }
 
 interface ResearchStage {
@@ -72,6 +91,11 @@ const Ask: React.FC<AskProps> = ({
   const [researchStages, setResearchStages] = useState<ResearchStage[]>([]);
   const [currentStageIndex, setCurrentStageIndex] = useState(0);
   const [conversationHistory, setConversationHistory] = useState<Message[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [isMessagesLoading, setIsMessagesLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [researchIteration, setResearchIteration] = useState(0);
   const [researchComplete, setResearchComplete] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -91,14 +115,14 @@ const Ask: React.FC<AskProps> = ({
     if (onRef) {
       onRef({ clearConversation });
     }
-  }, [onRef]);
+  }, [onRef, clearConversation]);
 
   // Scroll to bottom of response when it changes
   useEffect(() => {
     if (responseRef.current) {
       responseRef.current.scrollTop = responseRef.current.scrollHeight;
     }
-  }, [response]);
+  }, [conversationHistory, response, isMessagesLoading, isLoading]);
 
   // Close WebSocket when component unmounts
   useEffect(() => {
@@ -148,7 +172,19 @@ const Ask: React.FC<AskProps> = ({
     }
   }, [provider, model]);
 
-  const clearConversation = () => {
+  const getAuthToken = () => {
+    if (typeof window === 'undefined') {
+      return '';
+    }
+    return localStorage.getItem('cw_token') || '';
+  };
+
+  const getAuthHeaders = () => {
+    const token = getAuthToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  const resetConversationState = useCallback(() => {
     setQuestion('');
     setResponse('');
     setConversationHistory([]);
@@ -156,12 +192,168 @@ const Ask: React.FC<AskProps> = ({
     setResearchComplete(false);
     setResearchStages([]);
     setCurrentStageIndex(0);
+    setIsLoading(false);
+    setHistoryError(null);
+    closeWebSocket(webSocketRef.current);
+  }, []);
+
+  const clearConversation = useCallback(() => {
+    resetConversationState();
+    setSelectedConversationId(null);
     if (inputRef.current) {
       inputRef.current.focus();
     }
+  }, [resetConversationState]);
+
+  const formatTimestamp = (value: string) => {
+    try {
+      return new Date(value).toLocaleString();
+    } catch {
+      return value;
+    }
   };
+
+  const loadConversations = async () => {
+    const token = getAuthToken();
+    if (!token) {
+      setConversations([]);
+      setHistoryError(null);
+      return;
+    }
+
+    setIsHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const params = new URLSearchParams({
+        repoOwner: repoInfo.owner,
+        repoName: repoInfo.repo,
+        repoType: repoInfo.type || 'github'
+      });
+      const response = await fetch(`${API_BASE}/conversations?${params.toString()}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to load conversations: ${response.status}`);
+      }
+      const data: ConversationSummary[] = await response.json();
+      setConversations(data);
+      if (!selectedConversationId && data.length > 0) {
+        setSelectedConversationId(data[0].id);
+        void loadConversationMessages(data[0].id);
+      }
+    } catch (error) {
+      console.error('Failed to load conversations:', error);
+      setHistoryError(messages.ask?.historyLoadError || 'Failed to load conversations.');
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  };
+
+  const loadConversationMessages = async (conversationId: string) => {
+    const token = getAuthToken();
+    if (!token) {
+      setConversationHistory([]);
+      return;
+    }
+    setIsMessagesLoading(true);
+    setHistoryError(null);
+    setIsLoading(false);
+    closeWebSocket(webSocketRef.current);
+    try {
+      setResponse('');
+      const response = await fetch(`${API_BASE}/conversations/${conversationId}/messages`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to load messages: ${response.status}`);
+      }
+      const data: ConversationMessageRecord[] = await response.json();
+      const history = data.map((msg) => ({
+        role: msg.role,
+        content: msg.content
+      })) as Message[];
+      setConversationHistory(history);
+      const lastAssistant = data.slice().reverse().find((msg) => msg.role === 'assistant');
+      setResponse(lastAssistant?.content || '');
+      setResearchStages([]);
+      setCurrentStageIndex(0);
+      setResearchIteration(0);
+      setResearchComplete(false);
+    } catch (error) {
+      console.error('Failed to load conversation messages:', error);
+      setHistoryError(messages.ask?.historyLoadError || 'Failed to load conversations.');
+    } finally {
+      setIsMessagesLoading(false);
+    }
+  };
+
+  const createConversation = async (title: string): Promise<ConversationSummary | null> => {
+    const token = getAuthToken();
+    if (!token) {
+      return null;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/conversations`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
+        body: JSON.stringify({
+          repoOwner: repoInfo.owner,
+          repoName: repoInfo.repo,
+          repoType: repoInfo.type || 'github',
+          title: title.slice(0, 120)
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to create conversation: ${response.status}`);
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('Failed to create conversation:', error);
+      return null;
+    }
+  };
+
+  const persistConversationMessage = async (conversationId: string, message: Message) => {
+    const token = getAuthToken();
+    if (!token) {
+      return;
+    }
+    try {
+      await fetch(`${API_BASE}/conversations/${conversationId}/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
+        body: JSON.stringify({
+          role: message.role,
+          content: message.content
+        })
+      });
+    } catch (error) {
+      console.error('Failed to persist conversation message:', error);
+    }
+  };
+
+  useEffect(() => {
+    void loadConversations();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoInfo.owner, repoInfo.repo, repoInfo.type]);
   const downloadresponse = () =>{
-  const blob = new Blob([response], { type: 'text/markdown' });
+  const content = response || conversationHistory.slice().reverse().find(msg => msg.role === 'assistant')?.content || '';
+  if (!content) {
+    return;
+  }
+  const blob = new Blob([content], { type: 'text/markdown' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -256,7 +448,6 @@ const Ask: React.FC<AskProps> = ({
   const navigateToStage = (index: number) => {
     if (index >= 0 && index < researchStages.length) {
       setCurrentStageIndex(index);
-      setResponse(researchStages[index].content);
     }
   };
 
@@ -287,24 +478,15 @@ const Ask: React.FC<AskProps> = ({
     setIsLoading(true);
 
     try {
-      // Store the current response for use in the history
-      const currentResponse = response;
-
-      // Create a new message from the AI's previous response
-      const newHistory: Message[] = [
+      const activeConversationId = selectedConversationId;
+      const requestMessages: Message[] = [
         ...conversationHistory,
         {
-          role: 'assistant',
-          content: currentResponse
-        },
-        {
           role: 'user',
-          content: '[DEEP RESEARCH] Continue the research'
+          content: INTERNAL_DEEP_RESEARCH_CONTINUE
         }
       ];
-
-      // Update conversation history
-      setConversationHistory(newHistory);
+      setConversationHistory(requestMessages);
 
       // Increment research iteration
       const newIteration = researchIteration + 1;
@@ -317,7 +499,7 @@ const Ask: React.FC<AskProps> = ({
       const requestBody: ChatCompletionRequest = {
         repo_url: getRepoUrl(repoInfo),
         type: repoInfo.type,
-        messages: newHistory.map(msg => ({ role: msg.role as 'user' | 'assistant', content: msg.content })),
+        messages: requestMessages.map(msg => ({ role: msg.role as 'user' | 'assistant', content: msg.content })),
         provider: selectedProvider,
         model: isCustomSelectedModel ? customSelectedModel : selectedModel,
         language: language
@@ -371,7 +553,7 @@ const Ask: React.FC<AskProps> = ({
           setResponse(prev => prev + '\n\nError: WebSocket connection failed. Falling back to HTTP...');
 
           // Fallback to HTTP if WebSocket fails
-          fallbackToHttp(requestBody);
+          fallbackToHttp(requestBody, activeConversationId);
         },
         // Close handler
         () => {
@@ -391,6 +573,14 @@ const Ask: React.FC<AskProps> = ({
             setResearchComplete(isComplete);
           }
 
+          if (fullResponse) {
+            setConversationHistory(prev => [...prev, { role: 'assistant', content: fullResponse }]);
+            if (activeConversationId) {
+              void persistConversationMessage(activeConversationId, { role: 'assistant', content: fullResponse });
+              void loadConversations();
+            }
+          }
+
           setIsLoading(false);
         }
       );
@@ -403,7 +593,7 @@ const Ask: React.FC<AskProps> = ({
   };
 
   // Fallback to HTTP if WebSocket fails
-  const fallbackToHttp = async (requestBody: ChatCompletionRequest) => {
+  const fallbackToHttp = async (requestBody: ChatCompletionRequest, conversationId: string | null) => {
     try {
       // Make the API call using HTTP
       const apiResponse = await fetch(`/api/chat/stream`, {
@@ -469,6 +659,14 @@ const Ask: React.FC<AskProps> = ({
         setResearchComplete(true);
       } else {
         setResearchComplete(isComplete);
+      }
+
+      if (fullResponse) {
+        setConversationHistory(prev => [...prev, { role: 'assistant', content: fullResponse }]);
+        if (conversationId) {
+          void persistConversationMessage(conversationId, { role: 'assistant', content: fullResponse });
+          void loadConversations();
+        }
       }
     } catch (error) {
       console.error('Error during HTTP fallback:', error);
@@ -543,6 +741,8 @@ const Ask: React.FC<AskProps> = ({
     setResponse('');
     setResearchIteration(0);
     setResearchComplete(false);
+    setResearchStages([]);
+    setCurrentStageIndex(0);
 
     try {
       // Create initial message
@@ -552,8 +752,29 @@ const Ask: React.FC<AskProps> = ({
       };
 
       // Set initial conversation history
-      const newHistory: Message[] = [initialMessage];
+      const baseHistory = conversationHistory.filter(
+        (msg) => msg.content !== INTERNAL_DEEP_RESEARCH_CONTINUE
+      );
+      const newHistory: Message[] = [...baseHistory, initialMessage];
       setConversationHistory(newHistory);
+      setQuestion('');
+
+      let activeConversationId = selectedConversationId;
+      if (!activeConversationId) {
+        const createdConversation = await createConversation(question.trim());
+        if (createdConversation) {
+          activeConversationId = createdConversation.id;
+          setSelectedConversationId(createdConversation.id);
+          setConversations(prev => [
+            createdConversation,
+            ...prev.filter(item => item.id !== createdConversation.id)
+          ]);
+        }
+      }
+
+      if (activeConversationId) {
+        await persistConversationMessage(activeConversationId, initialMessage);
+      }
 
       // Prepare request body
       const requestBody: ChatCompletionRequest = {
@@ -599,10 +820,18 @@ const Ask: React.FC<AskProps> = ({
           setResponse(prev => prev + '\n\nError: WebSocket connection failed. Falling back to HTTP...');
 
           // Fallback to HTTP if WebSocket fails
-          fallbackToHttp(requestBody);
+          fallbackToHttp(requestBody, activeConversationId);
         },
         // Close handler
         () => {
+          if (fullResponse) {
+            setConversationHistory(prev => [...prev, { role: 'assistant', content: fullResponse }]);
+            if (activeConversationId) {
+              void persistConversationMessage(activeConversationId, { role: 'assistant', content: fullResponse });
+              void loadConversations();
+            }
+          }
+
           // If deep research is enabled, check if we should continue
           if (deepResearch) {
             const isComplete = checkIfResearchComplete(fullResponse);
@@ -637,266 +866,300 @@ const Ask: React.FC<AskProps> = ({
     }
   }, [messages.ask?.askButton, isLoading]);
 
-  return (
-    <div>
-      <div className="p-4">
-        <div className="flex items-center justify-end mb-4">
-          {/* Model selection button */}
-          <button
-            type="button"
-            onClick={() => setIsModelSelectionModalOpen(true)}
-            className="text-xs px-2.5 py-1 rounded border border-[var(--border-color)]/40 bg-[var(--background)]/10 text-[var(--foreground)]/80 hover:bg-[var(--background)]/30 hover:text-[var(--foreground)] transition-colors flex items-center gap-1.5"
-          >
-            <span>{selectedProvider}/{isCustomSelectedModel ? customSelectedModel : selectedModel}</span>
-            <svg className="h-3.5 w-3.5 text-[var(--accent-primary)]/70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
-          </button>
-        </div>
+  const displayMessages = conversationHistory.filter(
+    msg => msg.role !== 'system' && msg.content !== INTERNAL_DEEP_RESEARCH_CONTINUE
+  );
+  const showStreamingResponse =
+    isLoading || (!!response && displayMessages[displayMessages.length - 1]?.role !== 'assistant');
+  const formatUserContent = (content: string) => {
+    if (content.startsWith('[DEEP RESEARCH]')) {
+      return content.replace('[DEEP RESEARCH]', '').trim();
+    }
+    return content;
+  };
 
-        {/* Question input */}
-        <form onSubmit={handleSubmit} className="mt-4">
-          <div className="relative">
-            <input
-              ref={inputRef}
-              type="text"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              placeholder={messages.ask?.placeholder || 'What would you like to know about this codebase?'}
-              className="block w-full rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] text-[var(--foreground)] px-5 py-3.5 text-base shadow-sm focus:border-[var(--accent-primary)] focus:ring-2 focus:ring-[var(--accent-primary)]/30 focus:outline-none transition-all"
-              style={{ paddingRight: `${buttonWidth + 24}px` }}
-              disabled={isLoading}
-            />
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex h-full flex-col gap-4 md:flex-row">
+        <aside className="md:w-64 w-full shrink-0 border border-[var(--border-color)]/40 rounded-lg bg-[var(--background)]/40 p-3 flex flex-col">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm font-semibold text-[var(--foreground)]">
+              {messages.ask?.historyTitle || '对话历史'}
+            </span>
             <button
-              ref={buttonRef}
-              type="submit"
-              disabled={isLoading || !question.trim()}
-              className={`absolute right-3 top-1/2 transform -translate-y-1/2 px-4 py-2 rounded-md font-medium text-sm ${
-                isLoading || !question.trim()
-                  ? 'bg-[var(--button-disabled-bg)] text-[var(--button-disabled-text)] cursor-not-allowed'
-                  : 'bg-[var(--accent-primary)] text-white hover:bg-[var(--accent-primary)]/90 shadow-sm'
-              } transition-all duration-200 flex items-center gap-1.5`}
+              type="button"
+              onClick={clearConversation}
+              className="text-xs text-[var(--accent-primary)] hover:text-[var(--highlight)]"
             >
-              {isLoading ? (
-                <div className="w-4 h-4 rounded-full border-2 border-t-transparent border-white animate-spin" />
-              ) : (
-                <>
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-                  </svg>
-                  <span>{messages.ask?.askButton || 'Ask'}</span>
-                </>
-              )}
+              {messages.ask?.newConversation || '新对话'}
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+            {isHistoryLoading && (
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {messages.ask?.loadingHistory || '正在加载...'}
+              </div>
+            )}
+            {historyError && !isHistoryLoading && (
+              <div className="text-xs text-red-500">{historyError}</div>
+            )}
+            {!isHistoryLoading && !historyError && conversations.length === 0 && (
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {messages.ask?.emptyHistory || '暂无历史对话'}
+              </div>
+            )}
+            {conversations.map((conversation) => (
+              <button
+                key={conversation.id}
+                type="button"
+                onClick={() => {
+                  setSelectedConversationId(conversation.id);
+                  void loadConversationMessages(conversation.id);
+                }}
+                className={`w-full text-left p-2 rounded-md border transition-colors ${
+                  conversation.id === selectedConversationId
+                    ? 'border-[var(--accent-primary)]/60 bg-[var(--background)]/70'
+                    : 'border-transparent hover:border-[var(--border-color)]/40 hover:bg-[var(--background)]/60'
+                }`}
+              >
+                <div className="text-xs font-medium text-[var(--foreground)] truncate">
+                  {conversation.title || messages.ask?.untitledConversation || '未命名对话'}
+                </div>
+                <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-1">
+                  {formatTimestamp(conversation.updatedAt)}
+                </div>
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex items-center justify-end mb-3">
+            {/* Model selection button */}
+            <button
+              type="button"
+              onClick={() => setIsModelSelectionModalOpen(true)}
+              className="text-xs px-2.5 py-1 rounded border border-[var(--border-color)]/40 bg-[var(--background)]/10 text-[var(--foreground)]/80 hover:bg-[var(--background)]/30 hover:text-[var(--foreground)] transition-colors flex items-center gap-1.5"
+            >
+              <span>{selectedProvider}/{isCustomSelectedModel ? customSelectedModel : selectedModel}</span>
+              <svg className="h-3.5 w-3.5 text-[var(--accent-primary)]/70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
             </button>
           </div>
 
-          {/* Deep Research toggle */}
-          <div className="flex items-center mt-2 justify-between">
-            <div className="group relative">
-              <label className="flex items-center cursor-pointer">
-                <span className="text-xs text-gray-600 dark:text-gray-400 mr-2">{messages.ask?.deepResearch || '深度研究'}</span>
-                <div className="relative">
-                  <input
-                    type="checkbox"
-                    checked={deepResearch}
-                    onChange={() => setDeepResearch(!deepResearch)}
-                    className="sr-only"
-                  />
-                  <div className={`w-10 h-5 rounded-full transition-colors ${deepResearch ? 'bg-purple-600' : 'bg-gray-300 dark:bg-gray-600'}`}></div>
-                  <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white transition-transform transform ${deepResearch ? 'translate-x-5' : ''}`}></div>
-                </div>
-              </label>
-              <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block bg-gray-800 text-white text-xs rounded p-2 w-72 z-10">
-                <div className="relative">
-                  <div className="absolute -bottom-2 left-4 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800"></div>
-                  <p className="mb-1">{messages.ask?.deepResearchTooltip || '深度研究进行多轮调查：'}</p>
-                  <ul className="list-disc pl-4 text-xs">
-                    <li><strong>初始研究：</strong>{messages.ask?.initialResearch || '制定研究计划和初步发现'}</li>
-                    <li><strong>第1轮：</strong>{messages.ask?.iteration1 || '深入探索特定方面'}</li>
-                    <li><strong>第2轮：</strong>{messages.ask?.iteration2 || '调查剩余问题'}</li>
-                    <li><strong>第3-4轮：</strong>{messages.ask?.iterations3to4 || '深入研究复杂领域'}</li>
-                    <li><strong>最终结论：</strong>{messages.ask?.finalConclusion || '基于所有轮次的综合答案'}</li>
-                  </ul>
-                  <p className="mt-1 text-xs italic">{messages.ask?.autoResearchNote || 'AI会自动继续研究直到完成（最多5轮）'}</p>
+          <div
+            ref={responseRef}
+            className="flex-1 overflow-y-auto rounded-lg border border-[var(--border-color)]/40 bg-[var(--background)]/30 p-4 space-y-4"
+          >
+            {isMessagesLoading && (
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {messages.ask?.loadingConversation || '加载对话中...'}
+              </div>
+            )}
+            {!isMessagesLoading && displayMessages.length === 0 && !showStreamingResponse && (
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {messages.ask?.emptyConversation || '开始新的对话吧！'}
+              </div>
+            )}
+            {displayMessages.map((msg, index) => (
+              <div
+                key={`${msg.role}-${index}`}
+                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-[85%] rounded-lg px-4 py-2 text-sm leading-relaxed ${
+                    msg.role === 'user'
+                      ? 'bg-[var(--accent-primary)] text-white'
+                      : 'bg-[var(--background)]/80 border border-[var(--border-color)]/40 text-[var(--foreground)]'
+                  }`}
+                >
+                  {msg.role === 'assistant' ? (
+                    <Markdown content={msg.content} />
+                  ) : (
+                    <p className="whitespace-pre-wrap">{formatUserContent(msg.content)}</p>
+                  )}
                 </div>
               </div>
-            </div>
-            {deepResearch && (
-              <div className="text-xs text-purple-600 dark:text-purple-400">
-                {messages.ask?.multiTurnEnabled || '已启用多轮研究流程'}
-                {researchIteration > 0 && !researchComplete && ` (${messages.ask?.iteration?.replace('{n}', String(researchIteration)) || `第 ${researchIteration} 轮`})`}
-                {researchComplete && ` (${messages.ask?.complete || '已完成'})`}
+            ))}
+            {showStreamingResponse && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%] rounded-lg px-4 py-2 text-sm leading-relaxed bg-[var(--background)]/80 border border-[var(--border-color)]/40 text-[var(--foreground)]">
+                  {response ? (
+                    <Markdown content={response} />
+                  ) : (
+                    <div className="flex items-center space-x-2">
+                      <div className="animate-pulse flex space-x-1">
+                        <div className="h-2 w-2 bg-purple-600 rounded-full"></div>
+                        <div className="h-2 w-2 bg-purple-600 rounded-full"></div>
+                        <div className="h-2 w-2 bg-purple-600 rounded-full"></div>
+                      </div>
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {deepResearch
+                          ? (researchIteration === 0
+                            ? (messages.ask?.planningResearch || '规划研究方案...')
+                            : (messages.ask?.researchIterationInProgress?.replace('{n}', String(researchIteration)) || `第 ${researchIteration} 轮研究进行中...`))
+                          : (messages.ask?.thinking || '思考中...')}
+                      </span>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
-        </form>
 
-        {/* Response area */}
-        {response && (
-          <div className="border-t border-gray-200 dark:border-gray-700 mt-4">
-            <div
-              ref={responseRef}
-              className="p-4 max-h-[500px] overflow-y-auto"
-            >
-              <Markdown content={response} />
-            </div>
-
-            {/* Research navigation and clear button */}
-            <div className="p-2 flex justify-between items-center border-t border-gray-200 dark:border-gray-700">
-              {/* Research navigation */}
-              {deepResearch && researchStages.length > 1 && (
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={() => navigateToPreviousStage()}
-                    disabled={currentStageIndex === 0}
-                    className={`p-1 rounded-md ${currentStageIndex === 0 ? 'text-gray-400 dark:text-gray-600' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'}`}
-                    aria-label="Previous stage"
-                  >
-                    <FaChevronLeft size={12} />
-                  </button>
-
-                  <div className="text-xs text-gray-600 dark:text-gray-400">
-                    {currentStageIndex + 1} / {researchStages.length}
+          {deepResearch && researchStages.length > 0 && (
+            <div className="mt-3 border border-[var(--border-color)]/40 rounded-lg bg-[var(--background)]/20 p-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs text-gray-600 dark:text-gray-400">
+                  {messages.ask?.researchStages || '研究阶段'}
+                </div>
+                {researchStages.length > 1 && (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => navigateToPreviousStage()}
+                      disabled={currentStageIndex === 0}
+                      className={`p-1 rounded-md ${currentStageIndex === 0 ? 'text-gray-400 dark:text-gray-600' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                      aria-label="Previous stage"
+                    >
+                      <FaChevronLeft size={12} />
+                    </button>
+                    <div className="text-xs text-gray-600 dark:text-gray-400">
+                      {currentStageIndex + 1} / {researchStages.length}
+                    </div>
+                    <button
+                      onClick={() => navigateToNextStage()}
+                      disabled={currentStageIndex === researchStages.length - 1}
+                      className={`p-1 rounded-md ${currentStageIndex === researchStages.length - 1 ? 'text-gray-400 dark:text-gray-600' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                      aria-label="Next stage"
+                    >
+                      <FaChevronRight size={12} />
+                    </button>
                   </div>
-
-                  <button
-                    onClick={() => navigateToNextStage()}
-                    disabled={currentStageIndex === researchStages.length - 1}
-                    className={`p-1 rounded-md ${currentStageIndex === researchStages.length - 1 ? 'text-gray-400 dark:text-gray-600' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'}`}
-                    aria-label="Next stage"
-                  >
-                    <FaChevronRight size={12} />
-                  </button>
-
-                  <div className="text-xs text-gray-600 dark:text-gray-400 ml-2">
-                    {researchStages[currentStageIndex]?.title || `Stage ${currentStageIndex + 1}`}
-                  </div>
+                )}
+              </div>
+              <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                {researchStages[currentStageIndex]?.title || `Stage ${currentStageIndex + 1}`}
+              </div>
+              {researchStages[currentStageIndex] && (
+                <div className="prose dark:prose-invert max-w-none text-sm">
+                  <Markdown content={researchStages[currentStageIndex].content} />
                 </div>
               )}
+            </div>
+          )}
 
-            <div className="flex items-center space-x-2">
-              {/* Download button */}
-              <button
-                onClick={downloadresponse}
-                className="text-xs text-gray-500 dark:text-gray-400 hover:text-green-600 dark:hover:text-green-400 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 flex items-center gap-1"
-                title="下载响应为Markdown文件"
-              >
-                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                {messages.ask?.download || '下载'}
-              </button>
+          {(displayMessages.length > 0 || response) && (
+            <div className="mt-3 flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                {/* Download button */}
+                <button
+                  onClick={downloadresponse}
+                  className="text-xs text-gray-500 dark:text-gray-400 hover:text-green-600 dark:hover:text-green-400 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 flex items-center gap-1"
+                  title="下载响应为Markdown文件"
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  {messages.ask?.download || '下载'}
+                </button>
 
-              {/* Clear button */}
+                {/* Clear button */}
+                <button
+                  id="ask-clear-conversation"
+                  onClick={clearConversation}
+                  className="text-xs text-gray-500 dark:text-gray-400 hover:text-purple-600 dark:hover:text-purple-400 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700"
+                >
+                  {messages.ask?.clearConversation || '清除对话'}
+                </button>
+              </div>
+              {deepResearch && (
+                <div className="text-xs text-purple-600 dark:text-purple-400">
+                  {messages.ask?.multiTurnEnabled || '已启用多轮研究流程'}
+                  {researchIteration > 0 && !researchComplete && ` (${messages.ask?.iteration?.replace('{n}', String(researchIteration)) || `第 ${researchIteration} 轮`})`}
+                  {researchComplete && ` (${messages.ask?.complete || '已完成'})`}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Question input */}
+          <form onSubmit={handleSubmit} className="mt-4">
+            <div className="relative">
+              <input
+                ref={inputRef}
+                type="text"
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                placeholder={messages.ask?.placeholder || 'What would you like to know about this codebase?'}
+                className="block w-full rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] text-[var(--foreground)] px-5 py-3.5 text-base shadow-sm focus:border-[var(--accent-primary)] focus:ring-2 focus:ring-[var(--accent-primary)]/30 focus:outline-none transition-all"
+                style={{ paddingRight: `${buttonWidth + 24}px` }}
+                disabled={isLoading}
+              />
               <button
-                id="ask-clear-conversation"
-                onClick={clearConversation}
-                className="text-xs text-gray-500 dark:text-gray-400 hover:text-purple-600 dark:hover:text-purple-400 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700"
+                ref={buttonRef}
+                type="submit"
+                disabled={isLoading || !question.trim()}
+                className={`absolute right-3 top-1/2 transform -translate-y-1/2 px-4 py-2 rounded-md font-medium text-sm ${
+                  isLoading || !question.trim()
+                    ? 'bg-[var(--button-disabled-bg)] text-[var(--button-disabled-text)] cursor-not-allowed'
+                    : 'bg-[var(--accent-primary)] text-white hover:bg-[var(--accent-primary)]/90 shadow-sm'
+                } transition-all duration-200 flex items-center gap-1.5`}
               >
-                {messages.ask?.clearConversation || '清除对话'}
+                {isLoading ? (
+                  <div className="w-4 h-4 rounded-full border-2 border-t-transparent border-white animate-spin" />
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                    </svg>
+                    <span>{messages.ask?.askButton || 'Ask'}</span>
+                  </>
+                )}
               </button>
             </div>
-              </div>
-          </div>
-        )}
 
-        {/* Loading indicator */}
-        {isLoading && !response && (
-          <div className="p-4 border-t border-gray-200 dark:border-gray-700">
-            <div className="flex items-center space-x-2">
-              <div className="animate-pulse flex space-x-1">
-                <div className="h-2 w-2 bg-purple-600 rounded-full"></div>
-                <div className="h-2 w-2 bg-purple-600 rounded-full"></div>
-                <div className="h-2 w-2 bg-purple-600 rounded-full"></div>
-              </div>
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                {deepResearch
-                  ? (researchIteration === 0
-                    ? (messages.ask?.planningResearch || '规划研究方案...')
-                    : (messages.ask?.researchIterationInProgress?.replace('{n}', String(researchIteration)) || `第 ${researchIteration} 轮研究进行中...`))
-                  : (messages.ask?.thinking || '思考中...')}
-              </span>
-            </div>
-            {deepResearch && (
-              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 pl-5">
-                <div className="flex flex-col space-y-1">
-                  {researchIteration === 0 && (
-                    <>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.creatingResearchPlan || '创建研究计划...'}</span>
-                      </div>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.identifyingKeyAreas || '识别关键调查领域...'}</span>
-                      </div>
-                    </>
-                  )}
-                  {researchIteration === 1 && (
-                    <>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.exploringFirstArea || '深入探索第一个研究领域...'}</span>
-                      </div>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.analyzingCodePatterns || '分析代码模式和结构...'}</span>
-                      </div>
-                    </>
-                  )}
-                  {researchIteration === 2 && (
-                    <>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-amber-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.investigatingRemaining || '调查剩余问题...'}</span>
-                      </div>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-purple-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.connectingFindings || '连接之前轮次的发现...'}</span>
-                      </div>
-                    </>
-                  )}
-                  {researchIteration === 3 && (
-                    <>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-indigo-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.exploringDeeperConnections || '探索更深层次的关联...'}</span>
-                      </div>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.analyzingComplexPatterns || '分析复杂模式...'}</span>
-                      </div>
-                    </>
-                  )}
-                  {researchIteration === 4 && (
-                    <>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-teal-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.refiningConclusions || '完善研究结论...'}</span>
-                      </div>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-cyan-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.addressingEdgeCases || '处理剩余边缘情况...'}</span>
-                      </div>
-                    </>
-                  )}
-                  {researchIteration >= 5 && (
-                    <>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-purple-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.finalizingAnswer || '最终整合综合答案...'}</span>
-                      </div>
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-                        <span>{messages.ask?.synthesizingFindings || '综合所有研究发现...'}</span>
-                      </div>
-                    </>
-                  )}
+            {/* Deep Research toggle */}
+            <div className="flex items-center mt-2 justify-between">
+              <div className="group relative">
+                <label className="flex items-center cursor-pointer">
+                  <span className="text-xs text-gray-600 dark:text-gray-400 mr-2">{messages.ask?.deepResearch || '深度研究'}</span>
+                  <div className="relative">
+                    <input
+                      type="checkbox"
+                      checked={deepResearch}
+                      onChange={() => setDeepResearch(!deepResearch)}
+                      className="sr-only"
+                    />
+                    <div className={`w-10 h-5 rounded-full transition-colors ${deepResearch ? 'bg-purple-600' : 'bg-gray-300 dark:bg-gray-600'}`}></div>
+                    <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white transition-transform transform ${deepResearch ? 'translate-x-5' : ''}`}></div>
+                  </div>
+                </label>
+                <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block bg-gray-800 text-white text-xs rounded p-2 w-72 z-10">
+                  <div className="relative">
+                    <div className="absolute -bottom-2 left-4 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800"></div>
+                    <p className="mb-1">{messages.ask?.deepResearchTooltip || '深度研究进行多轮调查：'}</p>
+                    <ul className="list-disc pl-4 text-xs">
+                      <li><strong>初始研究：</strong>{messages.ask?.initialResearch || '制定研究计划和初步发现'}</li>
+                      <li><strong>第1轮：</strong>{messages.ask?.iteration1 || '深入探索特定方面'}</li>
+                      <li><strong>第2轮：</strong>{messages.ask?.iteration2 || '调查剩余问题'}</li>
+                      <li><strong>第3-4轮：</strong>{messages.ask?.iterations3to4 || '深入研究复杂领域'}</li>
+                      <li><strong>最终结论：</strong>{messages.ask?.finalConclusion || '基于所有轮次的综合答案'}</li>
+                    </ul>
+                    <p className="mt-1 text-xs italic">{messages.ask?.autoResearchNote || 'AI会自动继续研究直到完成（最多5轮）'}</p>
+                  </div>
                 </div>
               </div>
-            )}
-          </div>
-        )}
+              {deepResearch && (
+                <div className="text-xs text-purple-600 dark:text-purple-400">
+                  {messages.ask?.multiTurnEnabled || '已启用多轮研究流程'}
+                  {researchIteration > 0 && !researchComplete && ` (${messages.ask?.iteration?.replace('{n}', String(researchIteration)) || `第 ${researchIteration} 轮`})`}
+                  {researchComplete && ` (${messages.ask?.complete || '已完成'})`}
+                </div>
+              )}
+            </div>
+          </form>
+        </div>
       </div>
 
       {/* Model Selection Modal */}

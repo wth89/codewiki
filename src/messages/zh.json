@@ -135,7 +135,16 @@
     "refiningConclusions": "完善研究结论...",
     "addressingEdgeCases": "处理剩余边缘情况...",
     "finalizingAnswer": "最终整合综合答案...",
-    "synthesizingFindings": "综合所有研究发现..."
+    "synthesizingFindings": "综合所有研究发现...",
+    "historyTitle": "对话历史",
+    "newConversation": "新对话",
+    "loadingHistory": "正在加载对话...",
+    "emptyHistory": "暂无历史对话",
+    "historyLoadError": "对话加载失败",
+    "loadingConversation": "加载对话中...",
+    "emptyConversation": "开始新的对话吧！",
+    "untitledConversation": "未命名对话",
+    "researchStages": "研究阶段"
   },
   "repoPage": {
     "refreshWiki": "刷新Wiki",

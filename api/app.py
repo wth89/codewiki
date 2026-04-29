@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 
 # Register authentication router
 from api.auth_router import router as auth_router, init_db as _auth_init_db
+from api.conversation_router import router as conversation_router
 
 
 @asynccontextmanager
@@ -46,6 +47,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(conversation_router)
 
 # Helper function to get adalflow root path
 def get_adalflow_default_root_path():
