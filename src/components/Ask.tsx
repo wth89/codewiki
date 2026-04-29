@@ -172,17 +172,17 @@ const Ask: React.FC<AskProps> = ({
     }
   }, [provider, model]);
 
-  const getAuthToken = () => {
+  const getAuthToken = useCallback(() => {
     if (typeof window === 'undefined') {
       return '';
     }
     return localStorage.getItem('cw_token') || '';
-  };
+  }, []);
 
-  const getAuthHeaders = () => {
+  const getAuthHeaders = useCallback(() => {
     const token = getAuthToken();
     return token ? { Authorization: `Bearer ${token}` } : {};
-  };
+  }, [getAuthToken]);
 
   const resetConversationState = useCallback(() => {
     setQuestion('');
@@ -213,46 +213,7 @@ const Ask: React.FC<AskProps> = ({
     }
   };
 
-  const loadConversations = async () => {
-    const token = getAuthToken();
-    if (!token) {
-      setConversations([]);
-      setHistoryError(null);
-      return;
-    }
-
-    setIsHistoryLoading(true);
-    setHistoryError(null);
-    try {
-      const params = new URLSearchParams({
-        repoOwner: repoInfo.owner,
-        repoName: repoInfo.repo,
-        repoType: repoInfo.type || 'github'
-      });
-      const response = await fetch(`${API_BASE}/conversations?${params.toString()}`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        }
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to load conversations: ${response.status}`);
-      }
-      const data: ConversationSummary[] = await response.json();
-      setConversations(data);
-      if (!selectedConversationId && data.length > 0) {
-        setSelectedConversationId(data[0].id);
-        void loadConversationMessages(data[0].id);
-      }
-    } catch (error) {
-      console.error('Failed to load conversations:', error);
-      setHistoryError(messages.ask?.historyLoadError || 'Failed to load conversations.');
-    } finally {
-      setIsHistoryLoading(false);
-    }
-  };
-
-  const loadConversationMessages = async (conversationId: string) => {
+  const loadConversationMessages = useCallback(async (conversationId: string) => {
     const token = getAuthToken();
     if (!token) {
       setConversationHistory([]);
@@ -291,7 +252,55 @@ const Ask: React.FC<AskProps> = ({
     } finally {
       setIsMessagesLoading(false);
     }
-  };
+  }, [getAuthHeaders, getAuthToken, messages.ask?.historyLoadError]);
+
+  const loadConversations = useCallback(async () => {
+    const token = getAuthToken();
+    if (!token) {
+      setConversations([]);
+      setHistoryError(null);
+      return;
+    }
+
+    setIsHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const params = new URLSearchParams({
+        repoOwner: repoInfo.owner,
+        repoName: repoInfo.repo,
+        repoType: repoInfo.type || 'github'
+      });
+      const response = await fetch(`${API_BASE}/conversations?${params.toString()}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to load conversations: ${response.status}`);
+      }
+      const data: ConversationSummary[] = await response.json();
+      setConversations(data);
+      if (!selectedConversationId && data.length > 0) {
+        setSelectedConversationId(data[0].id);
+        void loadConversationMessages(data[0].id);
+      }
+    } catch (error) {
+      console.error('Failed to load conversations:', error);
+      setHistoryError(messages.ask?.historyLoadError || 'Failed to load conversations.');
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  }, [
+    getAuthHeaders,
+    getAuthToken,
+    loadConversationMessages,
+    messages.ask?.historyLoadError,
+    repoInfo.owner,
+    repoInfo.repo,
+    repoInfo.type,
+    selectedConversationId
+  ]);
 
   const createConversation = async (title: string): Promise<ConversationSummary | null> => {
     const token = getAuthToken();
@@ -346,8 +355,7 @@ const Ask: React.FC<AskProps> = ({
 
   useEffect(() => {
     void loadConversations();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoInfo.owner, repoInfo.repo, repoInfo.type]);
+  }, [loadConversations]);
   const downloadresponse = () =>{
   const content = response || conversationHistory.slice().reverse().find(msg => msg.role === 'assistant')?.content || '';
   if (!content) {
@@ -752,9 +760,7 @@ const Ask: React.FC<AskProps> = ({
       };
 
       // Set initial conversation history
-      const baseHistory = conversationHistory.filter(
-        (msg) => msg.content !== INTERNAL_DEEP_RESEARCH_CONTINUE
-      );
+      const baseHistory = stripInternalMessages(conversationHistory);
       const newHistory: Message[] = [...baseHistory, initialMessage];
       setConversationHistory(newHistory);
       setQuestion('');
@@ -866,8 +872,10 @@ const Ask: React.FC<AskProps> = ({
     }
   }, [messages.ask?.askButton, isLoading]);
 
-  const displayMessages = conversationHistory.filter(
-    msg => msg.role !== 'system' && msg.content !== INTERNAL_DEEP_RESEARCH_CONTINUE
+  const stripInternalMessages = (history: Message[]) =>
+    history.filter(msg => msg.content !== INTERNAL_DEEP_RESEARCH_CONTINUE);
+  const displayMessages = stripInternalMessages(conversationHistory).filter(
+    msg => msg.role !== 'system'
   );
   const showStreamingResponse =
     isLoading || (!!response && displayMessages[displayMessages.length - 1]?.role !== 'assistant');
